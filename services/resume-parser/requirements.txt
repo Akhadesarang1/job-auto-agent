@@ -1,0 +1,4 @@
+flask
+werkzeug
+pymupdf
+python-dotenv

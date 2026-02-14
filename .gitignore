@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+package-lock.json
+client/node_modules/
+server/node_modules/
+services/job-search/node_modules/
+client/package-lock.json
+server/package-lock.json
+services/job-search/package-lock.json
+
+# Environment variables
+.env
+.env.*
+.DS_Store
+
+# Build artifacts
+dist/
+build/
+client/dist/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+env/
+services/resume-parser/venv/
+services/llm-agent/venv/
+services/resume-parser/__pycache__/
+services/llm-agent/__pycache__/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+
+# Puppeteer
+.local-chromium/
