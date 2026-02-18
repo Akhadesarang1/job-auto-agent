@@ -7,7 +7,6 @@ import Login from "./Components/Login";
 import ResumeUploadForm from "./Components/ResumeUploadForm"; // Resume & Preferences
 import Signup from "./Components/Signup";
 
-
 function App() {
   return (
     <BrowserRouter>
@@ -18,6 +17,7 @@ function App() {
         <Route path="/preferences" element={<ResumeUploadForm />} />
         <Route path="/history" element={<History />} />
         <Route path="*" element={<Navigate to="/" replace />} />
+
       </Routes>
     </BrowserRouter>
   );

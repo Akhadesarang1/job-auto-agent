@@ -22,7 +22,7 @@ if not GEMINI_KEY:
     raise EnvironmentError("GEMINI_KEY not set")
 
 genai.configure(api_key=GEMINI_KEY)
-DEFAULT_MODEL = "gemini-2.0-flash-001"
+DEFAULT_MODEL = "gemini-flash-latest"
 
 # === SYSTEM PROMPT ===
 SYSTEM_INSTRUCTIONS = """
@@ -38,12 +38,20 @@ Respond ONLY with the résumé content—no commentary.
 
 # === HELPERS ===
 def extract_text_from_pdf(fp):
-    reader = PdfReader(fp)
-    pages = [p.extract_text() or "" for p in reader.pages]
-    return "\n".join(pages)
+    try:
+        reader = PdfReader(fp)
+        pages = [p.extract_text() or "" for p in reader.pages]
+        return "\n".join(pages)
+    except Exception as e:
+        logger.error(f"Error extracting text from PDF: {e}")
+        return ""
 
 
 # === ROUTES ===
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify(status="ok"), 200
+
 @app.route('/tailor', methods=['POST'])
 def tailor_resume():
     # Log incoming headers and parts
@@ -99,8 +107,26 @@ Target Job Description:
     model_name = request.form.get('model') or request.args.get('model')
     model = genai.GenerativeModel(model_name or DEFAULT_MODEL)
     try:
-        response = model.generate_content(prompt)
-        tailored = getattr(response, 'text', '').strip()
+        # Retry loop for 429 ResourceExhausted
+        import time
+        from google.api_core import exceptions
+
+        tailored = ""
+        for attempt in range(5): # Try 5 times
+            try:
+                response = model.generate_content(prompt)
+                tailored = getattr(response, 'text', '').strip()
+                break # Success
+            except exceptions.ResourceExhausted:
+                if attempt < 4:
+                    wait_time = (attempt + 1) * 3 # 3, 6, 9, 12...
+                    logger.warning(f"⚠️ Quota exceeded (429). Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    raise # Re-raise after all retries fail
+            except Exception:
+                raise # Re-raise other errors immediately
+
         logger.debug("Gemini response text (first 500 chars): %s", tailored[:500])
     except Exception as e:
         logger.exception("Gemini API error")

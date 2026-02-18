@@ -2,15 +2,14 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import {
-  FiCheckCircle,
-  FiClock,
-  FiFile,
-  FiLayers,
-  FiUpload,
-  FiUser,
+    FiCheckCircle,
+    FiClock,
+    FiFile,
+    FiLayers,
+    FiUpload,
+    FiUser,
 } from "react-icons/fi";
 export default function ResumeUploadForm() {
-  const [jobListings, setJobListings] = useState([]);
   const [formData, setFormData] = useState({
     name: "",
     email: "",
@@ -94,34 +93,40 @@ export default function ResumeUploadForm() {
 
     try {
       const token = localStorage.getItem("token");
+      const form = new FormData();
 
-      // Build only the required payload for your job-search service
-      const payload = {
-        roles: formData.roles, // e.g. ["Frontend Engineer"]
-        locations: formData.locations, // e.g. ["Bangalore"]
-        platforms: formData.platforms, // e.g. ["jsearch", "LinkedIn"]
-        keywords: formData.keywords, // e.g. "React"
-        numPagesJSearch: formData.numPagesJSearch || 1,
-      };
+      // Append resume file
+      if (formData.resume) {
+        form.append("resume", formData.resume);
+      }
 
-      // Trigger your job-search microservice
-      const res = await fetch("http://localhost:5002/api/scrape", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(payload),
+      // Append all other fields
+      Object.entries(formData).forEach(([key, value]) => {
+        if (key === "resume") return;
+        if (Array.isArray(value)) {
+          value.forEach((v) => form.append(key, v));
+        } else if (value !== "" && value != null) {
+          form.append(key, value);
+        }
       });
 
-      if (!res.ok) throw new Error("Job search trigger failed");
+      const res = await fetch("http://localhost:5000/api/upload", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        body: form,
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json();
+        throw new Error(errJson.message || "Resume upload failed");
+      }
+
       const json = await res.json();
+      console.log("✅ Upload response:", json);
 
-      console.log("✅ Job search response:", json);
-      setJobListings(json.listings || []); // Expect `listings` array back
-      // You can also read json.totalFetched, json.newlyAdded, etc.
-
-      // Optionally clear form / reset state here
+      // Reset form
       setFormData({
         name: "",
         email: "",
@@ -133,9 +138,8 @@ export default function ResumeUploadForm() {
         applicationFrequency: "Daily",
         experience: "",
         expectedCtc: "",
-        resume: null,
         registrationLink: "",
-        numPagesJSearch: 1,
+        resume: null,
       });
       setViewPdf(null);
     } catch (err) {

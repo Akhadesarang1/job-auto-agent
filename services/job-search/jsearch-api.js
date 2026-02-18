@@ -3,7 +3,7 @@ require("dotenv").config();
 const axios = require("axios");
 
 const JSEARCH_API_HOST = process.env.RAPIDAPI_JSEARCH_HOST;
-const JSEARCH_API_KEY = process.env.RAPIDAPI_KEY; // Make sure to add this to your .env file
+const JSEARCH_API_KEY = process.env.RAPIDAPI_KEY;
 
 if (!JSEARCH_API_HOST || !JSEARCH_API_KEY) {
   console.warn(
@@ -13,8 +13,6 @@ if (!JSEARCH_API_HOST || !JSEARCH_API_KEY) {
 
 /**
  * Transforms a job object from JSearch API to our internal format.
- * @param {object} apiJob - Job object from JSearch API.
- * @returns {object} - Job object in our internal format.
  */
 function transformJSearchJob(apiJob) {
   let location = apiJob.job_city || "";
@@ -33,103 +31,81 @@ function transformJSearchJob(apiJob) {
       apiJob.job_apply_link ||
       `https://www.google.com/search?q=${encodeURIComponent(
         apiJob.job_title + " " + apiJob.employer_name
-      )}`, // Fallback URL
-    platform: "JSearch", // Or could be apiJob.job_publisher or similar if available and desired
-    description: apiJob.job_description, // JSearch often provides this
+      )}`,
+    platform: "JSearch",
+    description: apiJob.job_description,
     employmentType: apiJob.job_employment_type,
-    postedAtText: apiJob.job_posted_at_datetime_utc, // This is a UTC string, might need formatting
-    // Add any other relevant fields you want to map
+    postedAtText: apiJob.job_posted_at_datetime_utc,
   };
 }
 
 /**
- * Fetches jobs from the JSearch API.
- * @param {object} params - Parameters for the job search.
- * @param {string[]} params.roles - Array of job roles/titles.
- * @param {string[]} params.locations - Array of locations.
- * @param {string} [params.keywords] - Additional keywords.
- * @param {number} [params.numPages=1] - Number of pages to fetch (JSearch API specific).
- * @returns {Promise<Array<object>>} - A promise that resolves to an array of job listings.
+ * Fetches jobs from the JSearch API, restricted to India only.
+ *
+ * @param {object} params
+ * @param {string[]} params.roles
+ * @param {string[]} params.locations
+ * @param {string}   params.keywords    // comma-separated string
+ * @param {number}   params.numPages    // how many pages to fetch per location
+ * @returns {Promise<object[]>}
  */
 async function fetchJobsFromJSearch({
   roles = [],
   locations = [],
   keywords = "",
-  numPages = 1, // JSearch specific pagination
+  numPages = 1,
 }) {
   if (!JSEARCH_API_HOST || !JSEARCH_API_KEY) {
     console.log("JSearch API not configured. Skipping JSearch.");
     return [];
   }
 
-  const queryParts = [...roles, ...locations];
-  if (keywords) {
-    queryParts.push(keywords);
-  }
-  const searchQuery = queryParts.join(" ");
+  // Split comma/space-separated keywords into tokens:
+  const keywordTokens = keywords
+    .split(/[,\s]+/)
+    .filter((tok) => tok.trim().length);
 
-  if (!searchQuery.trim()) {
-    console.log("No search query provided for JSearch. Skipping.");
-    return [];
-  }
+  const allJobs = [];
 
-  const options = {
-    method: "GET",
-    url: `https://${JSEARCH_API_HOST}/search`,
-    params: {
-      query: searchQuery,
-      page: "1", // JSearch uses page for pagination, starting from 1
-      num_pages: String(numPages), // Number of pages of results to return
-      // date_posted: 'today', // Example: 'all', 'today', '3days', 'week', 'month'
-      // remote_jobs_only: 'false', // Example: 'true' or 'false'
-      // employment_types: 'FULLTIME,CONTRACTOR', // Example: 'FULLTIME,PARTTIME,CONTRACTOR,INTERN'
-    },
-    headers: {
-      "X-RapidAPI-Key": JSEARCH_API_KEY,
-      "X-RapidAPI-Host": JSEARCH_API_HOST,
-    },
-  };
+  for (const loc of locations) {
+    // Build search query per-location
+    const queryParts = [...roles, loc, ...keywordTokens];
+    const searchQuery = queryParts.join(" ");
 
-  try {
+    const options = {
+      method: "GET",
+      url: `https://${JSEARCH_API_HOST}/search`,
+      params: {
+        query: searchQuery,
+        page: "1",
+        num_pages: String(numPages),
+        country: "in", // force India only
+      },
+      headers: {
+        "X-RapidAPI-Key": JSEARCH_API_KEY,
+        "X-RapidAPI-Host": JSEARCH_API_HOST,
+      },
+    };
+
     console.log(
-      `📞 Calling JSearch API with query: "${searchQuery}", num_pages: ${numPages}`
+      `📞 JSearch API: "${searchQuery}" (pages=${numPages}, country=in)`
     );
-    const response = await axios.request(options);
-
-    if (
-      response.data &&
-      response.data.data &&
-      Array.isArray(response.data.data)
-    ) {
-      const jobs = response.data.data
-        .map(transformJSearchJob)
-        .filter((job) => job.url && job.title); // Ensure essential fields are present
-      console.log(`👍 JSearch API returned ${jobs.length} jobs.`);
-      return jobs;
-    } else {
-      console.warn(
-        "JSearch API returned an unexpected response structure:",
-        response.data
-      );
-      return [];
+    try {
+      const response = await axios.request(options);
+      const data = response.data?.data;
+      if (Array.isArray(data) && data.length) {
+        const jobs = data.map(transformJSearchJob);
+        console.log(`👍 JSearch returned ${jobs.length} jobs for "${loc}"`);
+        allJobs.push(...jobs);
+      } else {
+        console.log(`⚠️ JSearch returned 0 jobs for "${loc}"`);
+      }
+    } catch (err) {
+      console.error(`❌ JSearch error for "${loc}":`, err.message);
     }
-  } catch (error) {
-    console.error("❌ Error fetching jobs from JSearch API:");
-    if (error.response) {
-      // The request was made and the server responded with a status code
-      // that falls out of the range of 2xx
-      console.error("Data:", error.response.data);
-      console.error("Status:", error.response.status);
-      console.error("Headers:", error.response.headers);
-    } else if (error.request) {
-      // The request was made but no response was received
-      console.error("Request:", error.request);
-    } else {
-      // Something happened in setting up the request that triggered an Error
-      console.error("Error Message:", error.message);
-    }
-    return []; // Return empty array on error
   }
+
+  return allJobs;
 }
 
 module.exports = { fetchJobsFromJSearch };

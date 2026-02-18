@@ -8,27 +8,48 @@ const { fetchJobsFromJSearch } = require("./jsearch-api");
 
 const app = express();
 const PORT = process.env.PORT_SCRAPER || 5002;
+const POLL_INTERVAL_MS =
+  parseInt(process.env.POLL_INTERVAL_MS, 10) || 60 * 1000;
 
 app.use(cors());
 app.use(express.json());
 
-// Connect to MongoDB
 mongoose
   .connect(process.env.MONGO_URI, {
     dbName: process.env.MONGO_DB_NAME || "job-auto-agent",
   })
   .then(() => {
-    console.log(
-      "🔍 DB connected:",
-      process.env.MONGO_DB_NAME || "job-auto-agent"
-    );
+    console.log("✅ [Scraper] Connected to MongoDB");
+    startPollingRegistrations();
   })
   .catch((err) => {
-    console.error("❌ MongoDB connection error:", err.message);
+    console.error("❌ [Scraper] MongoDB connection error:", err.message);
     process.exit(1);
   });
 
-// Mongoose Job Schema
+// ─── Schemas ─────────────────────────────────────────────────────────
+const registrationSchema = new mongoose.Schema(
+  {
+    user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    name: String,
+    email: String,
+    roles: [String],
+    locations: [String],
+    jobType: String,
+    platforms: [String],
+    keywords: String,
+    applicationFrequency: String,
+    experience: String,
+    expectedCtc: String,
+    registrationLink: String,
+    resumePath: String,
+  },
+  { timestamps: true }
+);
+const Registration =
+  mongoose.models.Registration ||
+  mongoose.model("Registration", registrationSchema);
+
 const jobSchema = new mongoose.Schema(
   {
     title: { type: String, trim: true, required: true },
@@ -40,157 +61,162 @@ const jobSchema = new mongoose.Schema(
     employmentType: { type: String, trim: true },
     postedAtText: { type: String, trim: true },
   },
-  {
-    timestamps: true,
-  }
+  { timestamps: true }
 );
-
 jobSchema.index({ url: 1, platform: 1 }, { unique: true });
-const Job = mongoose.model("Job", jobSchema);
+const Job = mongoose.models.Job || mongoose.model("Job", jobSchema);
 
-// POST /api/scrape - only runs when main server calls
-app.post("/api/scrape", async (req, res) => {
-  const {
+// ─── Core Scraping ────────────────────────────────────────────────────
+async function doScrapeForRegistration(regDoc) {
+  console.log("🔄 [Scraper] Scraping for Registration:", regDoc._id);
+
+  const roles = Array.isArray(regDoc.roles) ? regDoc.roles : [];
+  const locations = Array.isArray(regDoc.locations) ? regDoc.locations : [];
+  const keywords = regDoc.keywords || "";
+  let platforms = Array.isArray(regDoc.platforms)
+    ? regDoc.platforms.map((p) => p.toLowerCase())
+    : [];
+
+  // Always include jsearch + linkedin
+  platforms = Array.from(new Set([...platforms, "jsearch", "linkedin"]));
+
+  if (!roles.length || !locations.length) {
+    console.warn(
+      "⚠️ [Scraper] Skipping (missing roles or locations):",
+      regDoc._id
+    );
+    return;
+  }
+
+  console.log("🔎 [Scraper] Params:", {
     roles,
     locations,
-    platforms,
     keywords,
-    numPagesJSearch = 1,
-  } = req.body;
-
-  if (!roles?.length || !locations?.length || !platforms?.length) {
-    return res.status(400).json({
-      error: "Missing 'roles', 'locations', or 'platforms'.",
-    });
-  }
+    platforms,
+    numPagesJSearch: 2,
+  });
 
   let allListings = [];
-  const puppeteerPlatforms = [];
 
-  for (const platform of platforms) {
-    if (platform.toLowerCase() === "jsearch") {
-      try {
-        const jsearchResults = await fetchJobsFromJSearch({
-          roles,
-          locations,
-          keywords,
-          numPages: parseInt(numPagesJSearch, 10) || 1,
-        });
-        allListings.push(...jsearchResults);
-      } catch (err) {
-        console.error("❌ JSearch error:", err.message);
-      }
-    } else {
-      puppeteerPlatforms.push(platform);
-    }
+  // 1️⃣ JSearch
+  try {
+    console.log("📄 [Scraper] Fetching JSearch...");
+    const jResults = await fetchJobsFromJSearch({
+      roles,
+      locations,
+      keywords, // comma string
+      numPages: 2,
+    });
+    console.log(`✅ [Scraper] JSearch returned ${jResults.length} jobs`);
+    allListings.push(...jResults);
+  } catch (err) {
+    console.error("❌ [Scraper] JSearch error:", err.message);
   }
 
-  if (puppeteerPlatforms.length > 0) {
+  // 2️⃣ Puppeteer (LinkedIn, etc.)
+  const puppeteerPlatforms = platforms.filter((p) => p !== "jsearch");
+  if (puppeteerPlatforms.length) {
     try {
-      const puppeteerResults = await scrapeJobs({
+      console.log(
+        `🤖 [Scraper] Puppeteer scraping: ${puppeteerPlatforms.join(", ")}`
+      );
+      const pResults = await scrapeJobs({
         roles,
         locations,
         platforms: puppeteerPlatforms,
         keywords,
       });
-      allListings.push(...puppeteerResults);
+      console.log(`✅ [Scraper] Puppeteer returned ${pResults.length} jobs`);
+      allListings.push(...pResults);
     } catch (err) {
-      console.error("❌ Puppeteer scrape error:", err.message);
+      console.error("❌ [Scraper] Puppeteer error:", err.message);
     }
   }
 
-  if (allListings.length === 0) {
-    return res.json({
-      message: "No job listings found.",
-      count: 0,
-      newlyAdded: 0,
-      updated: 0,
-      listings: [],
-    });
+  if (!allListings.length) {
+    console.warn(`⚠️ [Scraper] No jobs for registration ${regDoc._id}`);
+    return;
+  }
+  if (allListings.length < 10) {
+    console.warn(
+      `⚠️ [Scraper] Only ${allListings.length} jobs fetched; expected ≥10`
+    );
   }
 
-  const operations = allListings
-    .filter((job) => job.url && job.platform && job.title)
-    .map((job) => ({
+  // 3️⃣ Upsert into DB
+  const ops = allListings
+    .filter((j) => j.url && j.title && j.platform)
+    .map((j) => ({
       updateOne: {
-        filter: { url: job.url, platform: job.platform },
+        filter: { url: j.url, platform: j.platform },
         update: {
           $set: {
-            title: job.title,
-            company: job.company || null,
-            location: job.location || null,
-            description: job.description || null,
-            employmentType: job.employmentType || null,
-            postedAtText: job.postedAtText || null,
+            title: j.title,
+            company: j.company || null,
+            location: j.location || null,
+            description: j.description || null,
+            employmentType: j.employmentType || null,
+            postedAtText: j.postedAtText || null,
           },
-          $setOnInsert: {
-            url: job.url,
-            platform: job.platform,
-          },
+          $setOnInsert: { url: j.url, platform: j.platform },
         },
         upsert: true,
       },
     }));
 
   try {
-    const result = await Job.bulkWrite(operations, { ordered: false });
-    res.json({
-      message: "Scrape and save complete.",
-      totalFetched: allListings.length,
-      validForSave: operations.length,
-      newlyAdded: result.upsertedCount || 0,
-      updated: result.modifiedCount || 0,
-    });
+    console.log(`💾 [Scraper] Writing ${ops.length} jobs to DB...`);
+    const result = await Job.bulkWrite(ops, { ordered: false });
+    console.log(
+      `✅ [Scraper] Upserted=${result.upsertedCount}, Modified=${result.modifiedCount}`
+    );
   } catch (err) {
-    console.error("❌ DB write error:", err);
-    res.status(500).json({
-      error: "Database error",
-      details: err.message,
-    });
+    console.error("❌ [Scraper] DB bulkWrite error:", err.message);
   }
-});
+}
 
-// GET /api/jobs - fetch jobs from DB
-app.get("/api/jobs", async (req, res) => {
+// ─── Polling ─────────────────────────────────────────────────────────
+let lastPolledAt = new Date(0);
+
+async function pollRegistrations() {
   try {
-    const {
-      platform,
-      title,
-      company,
-      location,
-      limit = 20,
-      page = 1,
-      sortBy = "createdAt",
-      order = "desc",
-    } = req.query;
+    const now = new Date();
+    console.log(
+      `👀 [Poll] Looking for regs updated after ${lastPolledAt.toISOString()}`
+    );
 
-    const query = {};
-    if (platform) query.platform = platform;
-    if (title) query.title = { $regex: title, $options: "i" };
-    if (company) query.company = { $regex: company, $options: "i" };
-    if (location) query.location = { $regex: location, $options: "i" };
+    const updatedRegs = await Registration.find({
+      updatedAt: { $gt: lastPolledAt },
+    }).lean();
 
-    const sortOrder = order === "asc" ? 1 : -1;
-    const jobs = await Job.find(query)
-      .sort({ [sortBy]: sortOrder })
-      .skip((parseInt(page) - 1) * parseInt(limit))
-      .limit(parseInt(limit));
+    const regsToProcess = updatedRegs.length
+      ? updatedRegs
+      : await Registration.find({}).lean();
 
-    const total = await Job.countDocuments(query);
-    res.json({
-      jobs,
-      currentPage: parseInt(page),
-      totalPages: Math.ceil(total / limit),
-      totalJobs: total,
-    });
+    console.log(
+      updatedRegs.length
+        ? `🔔 [Poll] Found ${updatedRegs.length} updated registrations`
+        : `🔕 [Poll] No updates; scraping all ${regsToProcess.length}`
+    );
+
+    for (const reg of regsToProcess) {
+      await doScrapeForRegistration(reg);
+    }
+
+    lastPolledAt = now;
   } catch (err) {
-    console.error("❌ Fetch error:", err);
-    res
-      .status(500)
-      .json({ error: "Failed to fetch jobs", details: err.message });
+    console.error("❌ [Poll] Error polling registrations:", err.message);
   }
-});
+}
+
+function startPollingRegistrations() {
+  pollRegistrations();
+  setInterval(pollRegistrations, POLL_INTERVAL_MS);
+}
+
+// ─── Health Check & Start ───────────────────────────────────────────
+app.get("/_health", (req, res) => res.send("🩺 Scraper alive"));
 
 app.listen(PORT, () =>
-  console.log(`🚀 Job-search listening on http://localhost:${PORT}`)
+  console.log(`🚀 [Scraper] Listening on http://localhost:${PORT}`)
 );
